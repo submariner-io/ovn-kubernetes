@@ -7,7 +7,7 @@ set -e
 # The script renders j2 templates into yaml files in ../yaml/
 
 # ensure j2 renderer installed
-pip freeze | grep j2cli || pip install j2cli[yaml] --user
+j2 -v > /dev/null 2>&1 || pip install j2cli[yaml] --user
 export PATH=~/.local/bin:$PATH
 
 OVN_IMAGE=""
@@ -41,7 +41,7 @@ OVN_MULTICAST_ENABLE=""
 OVN_EGRESSIP_ENABLE=
 OVN_V4_JOIN_SUBNET=""
 OVN_V6_JOIN_SUBNET=""
-
+OVN_CLUSTER_NAME=""
 # Parse parameters given as arguments to this script.
 while [ "$1" != "" ]; do
   PARAM=$(echo $1 | awk -F= '{print $1}')
@@ -155,6 +155,9 @@ while [ "$1" != "" ]; do
   --v6-join-subnet)
     OVN_V6_JOIN_SUBNET=$VALUE
     ;;
+  --cluster-name)
+    OVN_CLUSTER_NAME=$VALUE
+    ;;
   *)
     echo "WARNING: unknown parameter \"$PARAM\""
     exit 1
@@ -239,6 +242,12 @@ echo "ovn_v4_join_subnet: ${ovn_v4_join_subnet}"
 ovn_v6_join_subnet=${OVN_V6_JOIN_SUBNET}
 echo "ovn_v6_join_subnet: ${ovn_v6_join_subnet}"
 
+OVN_YAML_DIR=${OVN_YAML_DIR:-../yaml}
+if [[ -n "${OVN_CLUSTER_NAME}" ]]; then
+  OVN_YAML_DIR="../yaml/${OVN_CLUSTER_NAME}"
+fi
+mkdir -p ${OVN_YAML_DIR}
+
 ovn_image=${image} \
   ovn_image_pull_policy=${image_pull_policy} \
   kind=${KIND} \
@@ -259,7 +268,7 @@ ovn_image=${image} \
   ovn_egress_ip_enable=${ovn_egress_ip_enable} \
   ovn_ssl_en=${ovn_ssl_en} \
   ovn_remote_probe_interval=${ovn_remote_probe_interval} \
-  j2 ../templates/ovnkube-node.yaml.j2 -o ../yaml/ovnkube-node.yaml
+  j2 ../templates/ovnkube-node.yaml.j2 -o ${OVN_YAML_DIR}/ovnkube-node.yaml
 
 ovn_image=${image} \
   ovn_image_pull_policy=${image_pull_policy} \
@@ -279,7 +288,7 @@ ovn_image=${image} \
   ovn_ssl_en=${ovn_ssl_en} \
   ovn_master_count=${ovn_master_count} \
   ovn_gateway_mode=${ovn_gateway_mode} \
-  j2 ../templates/ovnkube-master.yaml.j2 -o ../yaml/ovnkube-master.yaml
+  j2 ../templates/ovnkube-master.yaml.j2 -o ${OVN_YAML_DIR}/ovnkube-master.yaml
 
 ovn_image=${image} \
   ovn_image_pull_policy=${image_pull_policy} \
@@ -288,7 +297,7 @@ ovn_image=${image} \
   ovn_ssl_en=${ovn_ssl_en} \
   ovn_nb_port=${ovn_nb_port} \
   ovn_sb_port=${ovn_sb_port} \
-  j2 ../templates/ovnkube-db.yaml.j2 -o ../yaml/ovnkube-db.yaml
+  j2 ../templates/ovnkube-db.yaml.j2 -o ${OVN_YAML_DIR}/ovnkube-db.yaml
 
 ovn_image=${image} \
   ovn_image_pull_policy=${image_pull_policy} \
@@ -306,12 +315,12 @@ ovn_image=${image} \
   ovn_sb_port=${ovn_sb_port} \
   ovn_nb_raft_port=${ovn_nb_raft_port} \
   ovn_sb_raft_port=${ovn_sb_raft_port} \
-  j2 ../templates/ovnkube-db-raft.yaml.j2 -o ../yaml/ovnkube-db-raft.yaml
+  j2 ../templates/ovnkube-db-raft.yaml.j2 -o ${OVN_YAML_DIR}/ovnkube-db-raft.yaml
 
 ovn_image=${image} \
   ovn_image_pull_policy=${image_pull_policy} \
   ovn_unprivileged_mode=${ovn_unprivileged_mode} \
-  j2 ../templates/ovs-node.yaml.j2 -o ../yaml/ovs-node.yaml
+  j2 ../templates/ovs-node.yaml.j2 -o ${OVN_YAML_DIR}/ovs-node.yaml
 
 # ovn-setup.yaml
 net_cidr=${OVN_NET_CIDR:-"10.128.0.0/14/23"}
@@ -326,10 +335,10 @@ echo "mtu: ${mtu}"
 
 net_cidr=${net_cidr} svc_cidr=${svc_cidr} \
   mtu_value=${mtu} k8s_apiserver=${k8s_apiserver} \
-  j2 ../templates/ovn-setup.yaml.j2 -o ../yaml/ovn-setup.yaml
+  j2 ../templates/ovn-setup.yaml.j2 -o ${OVN_YAML_DIR}/ovn-setup.yaml
 
-cp ../templates/ovnkube-monitor.yaml.j2 ../yaml/ovnkube-monitor.yaml
-cp ../templates/k8s.ovn.org_egressfirewalls.yaml.j2 ../yaml/k8s.ovn.org_egressfirewalls.yaml
-cp ../templates/k8s.ovn.org_egressips.yaml.j2 ../yaml/k8s.ovn.org_egressips.yaml
+cp ../templates/ovnkube-monitor.yaml.j2 ${OVN_YAML_DIR}/ovnkube-monitor.yaml
+cp ../templates/k8s.ovn.org_egressfirewalls.yaml.j2 ${OVN_YAML_DIR}/k8s.ovn.org_egressfirewalls.yaml
+cp ../templates/k8s.ovn.org_egressips.yaml.j2 ${OVN_YAML_DIR}/k8s.ovn.org_egressips.yaml
 
 exit 0

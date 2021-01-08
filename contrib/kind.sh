@@ -145,8 +145,7 @@ print_params()
 parse_args $*
 
 # ensure j2 renderer installed
-pip install wheel
-pip freeze | grep j2cli || pip install j2cli[yaml] --user
+j2 -v > /dev/null 2>&1 || (pip install wheel && pip install j2cli[yaml] --user)
 export PATH=~/.local/bin:$PATH
 
 # Set default values
@@ -164,6 +163,8 @@ OVN_DISABLE_SNAT_MULTIPLE_GWS=${OVN_DISABLE_SNAT_MULTIPLE_GWS:-false}
 OVN_MULTICAST_ENABLE=${OVN_MULTICAST_ENABLE:-false}
 KIND_ALLOW_SYSTEM_WRITES=${KIND_ALLOW_SYSTEM_WRITES:-false}
 OVN_IMAGE=${OVN_IMAGE:-local}
+REGISTRY_IP=${REGISTRY_IP:-127.0.0.1}
+DNS_DOMAIN=${DNS_DOMAIN:-${KIND_CLUSTER_NAME}.local}
 
 # Input not currently validated. Modify outside script at your own risk.
 # These are the same values defaulted to in KIND code (kind/default.go).
@@ -200,11 +201,17 @@ set -euxo pipefail
 #   IPv4 Addresses and strip off the trailing subnet mask, /xx
 # grep -v "127.0.0.1" -> Remove local host
 # head -n 1 -> Of the remaining, use first entry
-API_IP=$(ip -4 addr | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | grep -v "127.0.0.1" | head -n 1)
-if [ -z "$API_IP" ]; then
-  echo "Error detecting machine IPv4 to use as API server. Default to 0.0.0.0."
-  API_IP=0.0.0.0
-fi
+
+function kind_fixup_config() {
+    local cluster=$KIND_CLUSTER_NAME
+    local master_ip=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' ${cluster}-control-plane | head -n 1)
+    sed -i -- "s/server: .*/server: https:\/\/$master_ip:6443/g" $KUBECONFIG
+    sed -i -- "s/user: kind-.*/user: ${cluster}/g" $KUBECONFIG
+    sed -i -- "s/name: kind-.*/name: ${cluster}/g" $KUBECONFIG
+    sed -i -- "s/cluster: kind-.*/cluster: ${cluster}/g" $KUBECONFIG
+    sed -i -- "s/current-context: .*/current-context: ${cluster}/g" $KUBECONFIG
+    chmod a+r $KUBECONFIG
+}
 
 check_ipv6() {
   # Collect additional IPv6 data on test environment
@@ -248,41 +255,43 @@ if [ "$KIND_IPV4_SUPPORT" == true ] && [ "$KIND_IPV6_SUPPORT" == false ]; then
   IP_FAMILY=""
   NET_CIDR=$NET_CIDR_IPV4
   SVC_CIDR=$SVC_CIDR_IPV4
-  echo "IPv4 Only Support: API_IP=$API_IP --net-cidr=$NET_CIDR --svc-cidr=$SVC_CIDR"
+  echo "IPv4 Only Support: --net-cidr=$NET_CIDR --svc-cidr=$SVC_CIDR"
 elif [ "$KIND_IPV4_SUPPORT" == false ] && [ "$KIND_IPV6_SUPPORT" == true ]; then
   IP_FAMILY="ipv6"
   NET_CIDR=$NET_CIDR_IPV6
   SVC_CIDR=$SVC_CIDR_IPV6
-  echo "IPv6 Only Support: API_IP=$API_IP --net-cidr=$NET_CIDR --svc-cidr=$SVC_CIDR"
+  echo "IPv6 Only Support: --net-cidr=$NET_CIDR --svc-cidr=$SVC_CIDR"
 elif [ "$KIND_IPV4_SUPPORT" == true ] && [ "$KIND_IPV6_SUPPORT" == true ]; then
   IP_FAMILY="DualStack"
   NET_CIDR=$NET_CIDR_IPV4,$NET_CIDR_IPV6
   SVC_CIDR=$SVC_CIDR_IPV4,$SVC_CIDR_IPV6
-  echo "Dual Stack Support: API_IP=$API_IP --net-cidr=$NET_CIDR --svc-cidr=$SVC_CIDR"
+  echo "Dual Stack Support: --net-cidr=$NET_CIDR --svc-cidr=$SVC_CIDR"
 else
   echo "Invalid setup. KIND_IPV4_SUPPORT and/or KIND_IPV6_SUPPORT must be true."
   exit 1
 fi
 
 # Output of the j2 command
-KIND_CONFIG_LCL=./kind.yaml
+KIND_CONFIG_LCL=./kind-${KIND_CLUSTER_NAME}.yaml
 
-ovn_apiServerAddress=${API_IP} \
-  ovn_ip_family=${IP_FAMILY} \
+ovn_ip_family=${IP_FAMILY} \
   ovn_ha=${OVN_HA} \
   net_cidr=${NET_CIDR} \
   svc_cidr=${SVC_CIDR} \
   ovn_num_master=${KIND_NUM_MASTER} \
   ovn_num_worker=${KIND_NUM_WORKER} \
   cluster_log_level=${KIND_CLUSTER_LOGLEVEL:-4} \
+  registry_ip=${REGISTRY_IP} \
+  dns_domain=${DNS_DOMAIN} \
   j2 ${KIND_CONFIG} -o ${KIND_CONFIG_LCL}
 
 # Create KIND cluster. For additional debug, add '--verbosity <int>': 0 None .. 3 Debug
-export KUBECONFIG=${HOME}/admin.conf
+export KUBECONFIG=${KUBECONFIG:-${HOME}/${KIND_CLUSTER_NAME}.conf}
 if kind get clusters | grep ovn; then
   delete
 fi
 kind create cluster --name ${KIND_CLUSTER_NAME} --kubeconfig ${KUBECONFIG} --image kindest/node:${K8S_VERSION} --config=${KIND_CONFIG_LCL}
+kind_fixup_config
 cat ${KUBECONFIG}
 
 if [ "${GITHUB_ACTIONS:-false}" == "true" ]; then
@@ -339,6 +348,7 @@ fi
 API_URL=$(kind get kubeconfig --internal --name ${KIND_CLUSTER_NAME} | grep server | awk '{ print $2 }')
 
 # Create ovn-kube manifests
+
 pushd ../dist/images
 ./daemonset.sh \
   --image=${OVN_IMAGE} \
@@ -356,12 +366,13 @@ pushd ../dist/images
   --dbchecker-loglevel=5\
   --egress-ip-enable=true\
   --v4-join-subnet=${JOIN_SUBNET_IPV4}\
-  --v6-join-subnet=${JOIN_SUBNET_IPV6}
+  --v6-join-subnet=${JOIN_SUBNET_IPV6}\
+  --cluster-name=${KIND_CLUSTER_NAME}
 popd
 
 kind load docker-image ${OVN_IMAGE} --name ${KIND_CLUSTER_NAME}
 
-pushd ../dist/yaml
+pushd ../dist/yaml/${KIND_CLUSTER_NAME}
 run_kubectl apply -f k8s.ovn.org_egressfirewalls.yaml
 run_kubectl apply -f k8s.ovn.org_egressips.yaml
 run_kubectl apply -f ovn-setup.yaml
@@ -390,7 +401,7 @@ popd
 run_kubectl -n kube-system delete ds kube-proxy
 kind get clusters
 kind get nodes --name ${KIND_CLUSTER_NAME}
-kind export kubeconfig --name ${KIND_CLUSTER_NAME}
+#kind export kubeconfig --name ${KIND_CLUSTER_NAME}
 if [ "$KIND_INSTALL_INGRESS" == true ]; then
   run_kubectl apply -f ingress/mandatory.yaml
   run_kubectl apply -f ingress/service-nodeport.yaml
