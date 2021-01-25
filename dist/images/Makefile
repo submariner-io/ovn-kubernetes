@@ -84,4 +84,5 @@ BRANCH = $(shell git rev-parse  --symbolic-full-name HEAD)
 COMMIT = $(shell git rev-parse  HEAD)
 bld: ../../go-controller/_output/go/bin/ovnkube
 	cp -r ../../go-controller/_output/go/bin/* .
+	command -v upx > /dev/null && for file in $$(basename -a ../../go-controller/_output/go/bin/*); do upx $$file; done
 	echo "ref: ${BRANCH}  commit: ${COMMIT}" > git_info
