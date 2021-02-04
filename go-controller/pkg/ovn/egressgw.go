@@ -106,6 +106,9 @@ func (oc *Controller) addGWRoutesForNamespace(namespace string, gws []net.IP, ns
 		gr := "GR_" + pod.Spec.NodeName
 		for _, gw := range gws {
 			for _, podIP := range pod.Status.PodIPs {
+				if utilnet.IsIPv6(gw) != utilnet.IsIPv6String(podIP.IP) {
+					continue
+				}
 				mask := GetIPFullMask(podIP.IP)
 				_, stderr, err := util.RunOVNNbctl("--", "--may-exist", "--policy=src-ip", "--ecmp-symmetric-reply",
 					"lr-route-add", gr, podIP.IP+mask, gw.String())
@@ -135,12 +138,12 @@ func (oc *Controller) deletePodExternalGW(pod *kapi.Pod) {
 	klog.Infof("Deleting routes for external gateway pod: %s, for namespace(s) %s", pod.Name,
 		podRoutingNamespaceAnno)
 	for _, namespace := range strings.Split(podRoutingNamespaceAnno, ",") {
-		oc.deletePodGWRoutesForNamespace(pod.Name, namespace, pod.Spec.NodeName)
+		oc.deletePodGWRoutesForNamespace(pod.Name, namespace)
 	}
 }
 
 // deletePodGwRoutesForNamespace handles deleting all routes in a namespace for a specific pod GW
-func (oc *Controller) deletePodGWRoutesForNamespace(pod, namespace, node string) {
+func (oc *Controller) deletePodGWRoutesForNamespace(pod, namespace string) {
 	nsInfo := oc.getNamespaceLocked(namespace)
 	if nsInfo == nil {
 		return
@@ -165,11 +168,7 @@ func (oc *Controller) deletePodGWRoutesForNamespace(pod, namespace, node string)
 				continue
 			}
 			mask := GetIPFullMask(podIP)
-			// TODO (trozet): use the go bindings here and batch commands
-			if err := oc.delHybridRoutePolicyForPod(net.ParseIP(podIP), node); err != nil {
-				klog.Error(err)
-			}
-
+			node := strings.TrimPrefix(gr, "GR_")
 			_, stderr, err := util.RunOVNNbctl("--", "--if-exists", "--policy=src-ip",
 				"lr-route-del", gr, podIP+mask, gwIP.String())
 			if err != nil {
@@ -182,6 +181,12 @@ func (oc *Controller) deletePodGWRoutesForNamespace(pod, namespace, node string)
 				// clean up if there are no more routes for this podIP
 				if entry := nsInfo.podExternalRoutes[podIP]; len(entry) == 0 {
 					delete(nsInfo.podExternalRoutes, podIP)
+					// TODO (trozet): use the go bindings here and batch commands
+					// delete the ovn_cluster_router policy if the pod has no more exgws to revert back to normal
+					// default gw behavior
+					if err := oc.delHybridRoutePolicyForPod(net.ParseIP(podIP), node); err != nil {
+						klog.Error(err)
+					}
 				}
 			}
 		}
@@ -198,6 +203,9 @@ func (oc *Controller) deleteGWRoutesForNamespace(nsInfo *namespaceInfo) {
 	// TODO(trozet): batch all of these with ebay bindings
 	for podIP, gwToGr := range nsInfo.podExternalRoutes {
 		for gw, gr := range gwToGr {
+			if utilnet.IsIPv6String(gw) != utilnet.IsIPv6String(podIP) {
+				continue
+			}
 			mask := GetIPFullMask(podIP)
 			node := strings.TrimPrefix(gr, "GR_")
 			if err := oc.delHybridRoutePolicyForPod(net.ParseIP(podIP), node); err != nil {
@@ -322,6 +330,9 @@ func (oc *Controller) addPerPodGRSNAT(pod *kapi.Pod, podIfAddrs []*net.IPNet) er
 		gwIP := gwIPNet.IP.String()
 		for _, podIPNet := range podIfAddrs {
 			podIP := podIPNet.IP.String()
+			if utilnet.IsIPv6String(gwIP) != utilnet.IsIPv6String(podIP) {
+				continue
+			}
 			mask := GetIPFullMask(podIP)
 			// may-exist works only if the the nat rule being added has everything the same i.e.,
 			// the type, the router name, external IP and the logical IP must match
